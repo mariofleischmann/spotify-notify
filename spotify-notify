@@ -1,0 +1,344 @@
+#!/bin/bash -u
+#------------------------------------------------------------------------------
+#    FILE-NAME: spotify-notify
+#     LANGUAGE: bash-script
+#       AUTHOR: Mario Fleischmann
+#------------------------------------------------------------------------------
+# SYNOPSIS
+#    spotify-notify [-h|--help] [-V|--version] [-v|--verbose] [--spotifyd] [ID]
+#
+# DESCRIPTION
+#    Sends a desktop notification with Spotify song information
+#
+#    The song can be specified by...
+#       ... passing its ID (or songlink) as an argument or
+#       ... setting the TRACK_ID variable to its ID
+#
+# OPTIONS
+#    -h, --help           Print this help
+#    -V, --version        Print script version
+#    -v, --verbose        Provide more detailed information
+#    --spotifyd           Use script as a hook for spotifyd
+#                         Notification is only sent if PLAYER_EVENT is "change"
+#                         See INSTALLATION for setup instructions
+#
+# INSTALLATION
+#    The Client Credentials flow is used to get access to the Spotify API.
+#    Therefore, spotify-notify requires a valid Client ID and secret.
+#
+#    OBTAIN CLIENT ID AND SECRET
+#    * If the variables SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set,
+#    they are used for authentification.
+#    * The configuration of spotify-tui ($HOME/.config/spotify-tui/client.yml)
+#    is automatically read if existing and variables not set
+#
+#    SETUP AS SPOTIFYD HOOK
+#    * Add line in configuration ($HOME/.config.spotifyd/spotifyd.conf):
+#    on_song_change_hook = "path/to/spotify-notify --spotifyd"
+#    * Launch spotifyd with '--on-song-change-hook="/path/to/spotify-notify --spotifyd"'
+#
+# SUPPORTED NOTIFIERS
+#    notify-send
+#    terminal-notifer
+#
+# DEPENDENCIES
+#    curl   (API requests)
+#    jq     (API response parsing)
+#    one of SUPPORTED NOTIFIERS
+#    common tools like sed, tail, tr, base64 for string processing
+#
+#    OPTIONAL
+#    yq     (spotify-tui configuration parsing)
+#------------------------------------------------------------------------------
+
+SCRIPT=$(basename $0)
+VERSION=1.0
+
+CACHE="$HOME/.cache/spotify-notify"
+OAUTH="$CACHE/auth.json"
+SONG_INFO="$CACHE/song.json"
+ALBUM_COVER="$CACHE/cover.png"
+
+VerboseMode=0
+SpotifydMode=0
+
+function synopsis ()
+# DESCRIPTION: Prints the synopsis of the script
+#      STDOUT: Synopsis of the script
+{
+    sed -e '1,/SYNOPSIS/d;' "$0" | sed -ne '1,1 s/#\ *//p'
+    return 0
+}
+
+function fullinfo ()
+# DESCRIPTION: Prints the usage of the script
+#      STDOUT: Usage of the script
+{
+    printf '%s\n\n' "$SCRIPT version $VERSION"
+    delimiter='#\-\-\-\-\-'
+    sed -e '1,/'$delimiter'/d' "$0" \
+    | sed -ne '1,/'$delimiter'/d ; /'$delimiter'/q ; s/^# //p ; s/^#//p'
+    return 0
+}
+
+function credentials ()
+# DESCRIPTION: Ensures that the spotify client credentials are set:
+#              SPOTIFY_CLIENT_ID
+#              SPOTIFY_CLIENT_SECRET
+#     RETURNS: 0 on success, 1 if fail
+{
+    # check whether credentials are already set
+    if [[ -n "${SPOTIFY_CLIENT_ID:-}" && -n "${SPOTIFY_CLIENT_SECRET:-}" ]] ; then
+        return 0
+    else
+        echo "$SCRIPT WARN: credential variables not set" >&2
+    fi
+
+    # otherwise check if spotify-tui configuration can be read
+    SPOTIFY_TUI_CONFIG="$HOME/.config/spotify-tui/client.yml"
+
+    if [[ ! -f $SPOTIFY_TUI_CONFIG ]] ; then
+        echo "$SCRIPT ERROR: spotify-tui configuration does not exist" >&2
+        return 1
+    fi
+
+    [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: read spotify-tui config because client credentials have not been set" >&2
+
+    SPOTIFY_CLIENT_ID=$(yq --exit-status '.client_id' $SPOTIFY_TUI_CONFIG 2> /dev/null)
+    if [[ $? != 0 ]] ; then
+        echo "$SCRIPT" 'ERROR: "client_id"' not found in $SPOTIFY_TUI_CONFIG >&2
+        return 1
+    fi
+
+    SPOTIFY_CLIENT_SECRET=$(yq --exit-status '.client_secret' $SPOTIFY_TUI_CONFIG 2> /dev/null)
+    if [[ $? != 0 ]] ; then
+        echo "$SCRIPT" 'ERROR: "client_secret"' not found in $SPOTIFY_TUI_CONFIG >&2
+        return 1
+    fi
+
+    return 0
+}
+
+function authenticate ()
+# DESCRIPTION: Retrieves a session token from Spotify and saves it in file $OAUTH.
+#     RETURNS: 0 on success, 1 if fail
+{
+    credentials
+
+    if [[ $? != 0 ]] ; then
+        echo "$SCRIPT FATAL: client credentials unknown." >&2
+        return 1
+    fi
+
+    # The base64 encoded string must not be line separated!
+    # Some base64 implementations insert newline after 76 character.
+    # It can be turned off via flag. However (for compatbility with macOS), do not use the flag
+    # Remove newlines via tr
+    AUTH=$(printf '%s:%s' "$SPOTIFY_CLIENT_ID" "$SPOTIFY_CLIENT_SECRET" | base64 | tr -d '\n')
+    CURL_RESPONSE=$(curl --request "POST" \
+        "https://accounts.spotify.com/api/token" \
+        --write-out "%{errormsg}\n%{http_code}" \
+        --header "Authorization: Basic $AUTH" \
+        --data "grant_type=client_credentials" \
+        --output $OAUTH \
+        --silent)
+
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE != 0 ]] ; then
+        # 'head -n -1' not usable because not supported in macOS
+        ERROR_MSG=$(echo "$CURL_RESPONSE" | sed -e '$ d')
+        echo "$SCRIPT ERROR: failed to authenticate. curl ($EXIT_CODE): $ERROR_MSG" >&2
+        # OAUTH is invalid, therefore delete
+        rm -f $OAUTH
+        return 1
+    fi
+
+    HTTP_CODE=$(echo "$CURL_RESPONSE" | tail -n 1)
+    if [[ $HTTP_CODE != 200 ]] ; then
+        echo "$SCRIPT ERROR: failed to authenticate. HTTP $HTTP_CODE response" >&2
+        # OAUTH is invalid, therefore delete
+        rm -f $OAUTH
+        return 1
+    fi
+
+    return 0
+}
+
+function cleanup ()
+# DESCRIPTION: Cleans up the temporary files generated during script execution
+#     RETURNS: Error code set before entering cleanup function
+{
+    EXIT_CODE=$?
+    rm -f $SONG_INFO $ALBUM_COVER
+    return $EXIT_CODE
+}
+
+if [[ $# -eq 0 ]] ; then
+    # no arguments given
+    synopsis
+    exit 1
+fi
+
+while [[ "${1-}" =~ ^- ]] ; do
+    case $1 in
+        -h | --help)        fullinfo ; exit 1 ;;
+        -V| --version)      echo $VERSION ; exit 1 ;;
+        -v| --verbose)      VerboseMode=1  ;;
+        --spotifyd)         SpotifydMode=1  ;;
+        --)                 shift ; break ;;
+        *)                  echo "$SCRIPT FATAL: invalid option $1." >&2 ; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -n "${2:-}" ]] ; then
+    echo "$SCRIPT FATAL: too many arguments" >&2
+    exit 1
+fi
+
+if [[ -n "${1:-}" ]] ; then
+    # URI syntax of songlink:
+    # https://open.spotify.com/track/TRACK_ID[?QUERY]
+    TRACK_ID=$(echo "${1##*/}" | sed -e 's/?.*//')
+    [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: extracted ID \"$TRACK_ID\" from \"$1\"" >&2
+elif [[ $SpotifydMode != 0 ]] ; then
+    if [[ -z ${PLAYER_EVENT:-} ]] ; then
+        echo "$SCRIPT FATAL: PLAYER_EVENT not set" >&2
+        exit 1
+    elif [[ $PLAYER_EVENT != "change" ]] ; then
+        echo "$SCRIPT FATAL: PLAYER_EVENT set to $PLAYER_EVENT (should be \"change\")" >&2
+        exit 1
+    fi
+else
+    echo "$SCRIPT FATAL: song ID not specified" >&2
+    exit 1
+fi
+
+trap cleanup EXIT
+
+[[ ! -d $CACHE ]] && mkdir -p $CACHE
+
+if [[ ! -f $OAUTH ]] ; then
+    [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: authenticate at Spotify" >&2
+    authenticate
+    if [[ $? != 0 ]] ; then
+        echo "$SCRIPT FATAL: could not authenticate at Spotify" >&2
+        exit 1
+    fi
+fi 
+
+EXPIRE_SECONDS=$(jq '.expires_in' $OAUTH)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'FATAL: "expires_in"' not found in $OAUTH >&2
+    exit 1
+fi
+
+# create new token if existing one is too old
+if [[ -z $(find $OAUTH -newermt "-$EXPIRE_SECONDS seconds") ]] ; then
+    [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: authenticate at Spotify because session expired" >&2
+    authenticate
+    if [[ $? != 0 ]] ; then
+        echo "$SCRIPT FATAL: could not authenticate at Spotify" >&2
+        exit 1
+    fi
+fi
+
+
+OAUTH_TOKEN=$(jq --raw-output '.access_token' $OAUTH)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'FATAL: "access_token"' not found in $OAUTH >&2
+    # OAUTH file is invalid, therefore delete
+    rm -f $OAUTH
+    exit 1
+fi
+
+TOKEN_TYPE=$(jq --raw-output '.token_type' $OAUTH)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'FATAL: "token_type"' not found in $OAUTH >&2
+    # OAUTH file is invalid, therefore delete
+    rm -f $OAUTH
+    exit 1
+fi
+
+[[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: get song information" >&2
+CURL_RESPONSE=$(curl --request "GET" \
+    "https://api.spotify.com/v1/tracks/$TRACK_ID" \
+    --write-out "%{errormsg}\n%{http_code}" \
+    --header "Accept: application/json" \
+    --header "Content-Type: application/json" \
+    --header "Authorization: $TOKEN_TYPE $OAUTH_TOKEN" \
+    --output $SONG_INFO \
+    --silent)
+
+EXIT_CODE=$?
+if [[ $EXIT_CODE != 0 ]] ; then
+    ERROR_MSG=$(echo "$CURL_RESPONSE" | sed -e '$ d')
+    echo "$SCRIPT FATAL: failed to retrieve song info. curl ($EXIT_CODE): $ERROR_MSG" >&2
+    exit 1
+fi
+
+HTTP_CODE=$(echo "$CURL_RESPONSE" | tail -n 1)
+if [[ $HTTP_CODE != 200 ]] ; then 
+    echo "$SCRIPT FATAL: failed to retrieve song info. HTTP $HTTP_CODE response" >&2
+    RESPONSE=$(cat $SONG_INFO)
+    if [[ $VerboseMode != 0 && -n $RESPONSE ]] ; then
+        echo "$SCRIPT INFO: spotify response:"
+        echo "$RESPONSE"
+    fi
+    exit 1
+fi
+
+TRACK_NAME=$(jq '.name' $SONG_INFO)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'FATAL: "name"' not found in $SONG_INFO >&2
+    exit 1
+fi
+
+ARTIST_NAME=$(jq '.artists[0].name' $SONG_INFO)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'FATAL: "artists[0].name"' not found in $SONG_INFO >&2
+    exit 1
+fi
+
+# array "images" contains URIs of album covers with different quality
+# 2: cover with lowest quality
+# no need to exit on error. Song information can be displayed without cover
+COVER_URL=$(jq --raw-output '.album.images[2].url' $SONG_INFO)
+if [[ $? != 0 ]] ; then
+    echo "$SCRIPT" 'ERROR: "album.images[2].url"' not found in $SONG_INFO >&2
+else
+    [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: get album cover" >&2
+    CURL_RESPONSE=$(curl $COVER_URL \
+        --write-out "%{errormsg}\n%{http_code}" \
+        --output $ALBUM_COVER \
+        --silent)
+
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE != 0 ]] ; then
+        ERROR_MSG=$(echo "$CURL_RESPONSE" | sed -e '$ d')
+        echo "$SCRIPT ERROR: failed to retrieve album cover. curl ($EXIT_CODE): $ERROR_MSG" >&2
+    else
+        HTTP_CODE=$(echo "$CURL_RESPONSE" | tail -n 1)
+        if [[ $HTTP_CODE != 200 ]] ; then 
+            echo "$SCRIPT ERROR: failed to retrieve cover. HTTP $HTTP_CODE response" >&2
+            RESPONSE=$(cat $ALBUM_COVER)
+            if [[ $VerboseMode != 0 && -n $RESPONSE ]] ; then
+                echo "$SCRIPT INFO: spotify response:"
+            fi
+            rm $ALBUM_COVER
+        fi
+    fi
+fi
+
+# display song information
+if command -v terminal-notifier > /dev/null ; then
+    terminal-notifier \
+        -title "$TRACK_NAME" \
+        -message "$ARTIST_NAME" \
+        $([[ -f "$ALBUM_COVER" ]] && echo "-contentImage $ALBUM_COVER")
+elif command -v notify-send > /dev/null ; then
+    notify-send --expire-time 5000 \
+        "$TRACK_NAME" \
+        "$ARTIST_NAME" \
+        $([[ -f "$ALBUM_COVER" ]] && echo "--icon=$ALBUM_COVER")
+fi
