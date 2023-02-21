@@ -8,23 +8,23 @@ https://user-images.githubusercontent.com/55689951/220197787-8d3d2a88-cf35-43f8-
 ## Usage
 
 ```
-# SYNOPSIS
-#    spotify-notify [-h|--help] [-V|--version] [-v|--verbose] [--spotifyd] [ID]
-#
-# DESCRIPTION
-#    Sends a desktop notification with Spotify song information
-#
-#    The song can be specified by...
-#       ... passing its ID (or songlink) as an argument or
-#       ... setting the TRACK_ID variable to its ID
-#
-# OPTIONS
-#    -h, --help           Print this help
-#    -V, --version        Print script version
-#    -v, --verbose        Provide more detailed information
-#    --spotifyd           Use script as a hook for spotifyd
-#                         Notification is only sent if PLAYER_EVENT is "change"
-#                         See INSTALLATION for setup instructions
+SYNOPSIS
+   spotify-notify [-h|--help] [-V|--version] [-v|--verbose] [--spotifyd] [ID]
+
+DESCRIPTION
+   Sends a desktop notification with Spotify song information
+
+   The song can be specified by...
+      ... passing its ID (or songlink) as an argument or
+      ... setting the TRACK_ID variable to its ID
+
+OPTIONS
+   -h, --help           Print this help
+   -V, --version        Print script version
+   -v, --verbose        Provide more detailed information
+   --spotifyd           Use script as a hook for spotifyd
+                        Notification is only sent if PLAYER_EVENT is "change"
+                        See INSTALLATION for setup instructions
 ```
 
 ## Installation
