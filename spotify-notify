@@ -33,7 +33,7 @@
 #    is automatically read if existing and variables not set
 #
 #    SETUP AS SPOTIFYD HOOK
-#    * Add line in configuration ($HOME/.config.spotifyd/spotifyd.conf):
+#    * Add line in configuration ($HOME/.config/spotifyd/spotifyd.conf):
 #    on_song_change_hook = "path/to/spotify-notify --spotifyd"
 #    * Launch spotifyd with '--on-song-change-hook="/path/to/spotify-notify --spotifyd"'
 #
@@ -282,8 +282,8 @@ if [[ $HTTP_CODE != 200 ]] ; then
     echo "$SCRIPT FATAL: failed to retrieve song info. HTTP $HTTP_CODE response" >&2
     RESPONSE=$(cat $SONG_INFO)
     if [[ $VerboseMode != 0 && -n $RESPONSE ]] ; then
-        echo "$SCRIPT INFO: spotify response:"
-        echo "$RESPONSE"
+        echo "$SCRIPT INFO: spotify response:" >&2
+        echo "$RESPONSE" >&2
     fi
     exit 1
 fi
@@ -323,7 +323,8 @@ else
             echo "$SCRIPT ERROR: failed to retrieve cover. HTTP $HTTP_CODE response" >&2
             RESPONSE=$(cat $ALBUM_COVER)
             if [[ $VerboseMode != 0 && -n $RESPONSE ]] ; then
-                echo "$SCRIPT INFO: spotify response:"
+                echo "$SCRIPT INFO: spotify response:" >&2
+                echo $RESPONSE >&2
             fi
             rm $ALBUM_COVER
         fi
