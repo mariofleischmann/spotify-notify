@@ -104,13 +104,13 @@ function credentials ()
 
     [[ $VerboseMode != 0 ]] && echo "$SCRIPT INFO: read spotify-tui config because client credentials have not been set" >&2
 
-    SPOTIFY_CLIENT_ID=$(yq --exit-status '.client_id' $SPOTIFY_TUI_CONFIG 2> /dev/null)
+    SPOTIFY_CLIENT_ID=$(yq --raw-output --exit-status '.client_id' $SPOTIFY_TUI_CONFIG 2> /dev/null)
     if [[ $? != 0 ]] ; then
         echo "$SCRIPT" 'ERROR: "client_id"' not found in $SPOTIFY_TUI_CONFIG >&2
         return 1
     fi
 
-    SPOTIFY_CLIENT_SECRET=$(yq --exit-status '.client_secret' $SPOTIFY_TUI_CONFIG 2> /dev/null)
+    SPOTIFY_CLIENT_SECRET=$(yq --raw-output --exit-status '.client_secret' $SPOTIFY_TUI_CONFIG 2> /dev/null)
     if [[ $? != 0 ]] ; then
         echo "$SCRIPT" 'ERROR: "client_secret"' not found in $SPOTIFY_TUI_CONFIG >&2
         return 1
@@ -156,6 +156,11 @@ function authenticate ()
     HTTP_CODE=$(echo "$CURL_RESPONSE" | tail -n 1)
     if [[ $HTTP_CODE != 200 ]] ; then
         echo "$SCRIPT ERROR: failed to authenticate. HTTP $HTTP_CODE response" >&2
+        RESPONSE=$(cat $OAUTH)
+        if [[ $VerboseMode != 0 && -n $RESPONSE ]] ; then
+            echo "$SCRIPT INFO: spotify response:" >&2
+            echo "$RESPONSE" >&2
+        fi
         # OAUTH is invalid, therefore delete
         rm -f $OAUTH
         return 1
