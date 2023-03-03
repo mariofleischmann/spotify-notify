@@ -293,13 +293,13 @@ if [[ $HTTP_CODE != 200 ]] ; then
     exit 1
 fi
 
-TRACK_NAME=$(jq '.name' $SONG_INFO)
+TRACK_NAME=$(jq --raw-output '.name' $SONG_INFO)
 if [[ $? != 0 ]] ; then
     echo "$SCRIPT" 'FATAL: "name"' not found in $SONG_INFO >&2
     exit 1
 fi
 
-ARTIST_NAME=$(jq '.artists[0].name' $SONG_INFO)
+ARTIST_NAME=$(jq --raw-output '.artists[0].name' $SONG_INFO)
 if [[ $? != 0 ]] ; then
     echo "$SCRIPT" 'FATAL: "artists[0].name"' not found in $SONG_INFO >&2
     exit 1
